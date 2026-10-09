@@ -50,53 +50,6 @@ async function ensureDailyAbsentRecords(db) {
   }
 }
 
-// =============================================================================
-// OPTIONAL EXTERNAL LLM CALLER (Google Gemini / OpenAI)
-// =============================================================================
-async function callLLMIfAvailable(systemPrompt, userPrompt) {
-  const geminiKey = process.env.GEMINI_API_KEY;
-  const openAiKey = process.env.OPENAI_API_KEY;
-
-  if (geminiKey) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`;
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: `${systemPrompt}\n\nUser: ${userPrompt}` }] }],
-          generationConfig: { temperature: 0.2, maxOutputTokens: 800 }
-        }),
-        signal: AbortSignal.timeout(4000)
-      });
-      const data = await resp.json();
-      return data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
-    } catch (_) {}
-  }
-
-  if (openAiKey) {
-    try {
-      const url = 'https://api.openai.com/v1/chat/completions';
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openAiKey}` },
-        body: JSON.stringify({
-          model: 'gpt-4o-mini',
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt }
-          ],
-          temperature: 0.2
-        }),
-        signal: AbortSignal.timeout(4000)
-      });
-      const data = await resp.json();
-      return data?.choices?.[0]?.message?.content || null;
-    } catch (_) {}
-  }
-
-  return null;
-}
 
 // =============================================================================
 // UNIVERSAL TASK & CLIENT RESOLUTION HELPERS
@@ -590,6 +543,741 @@ function parseNaturalLanguageParameters(text, allClients = [], allUsers = [], al
 }
 
 // =============================================================================
+// GROQ LLM TOOL CALLING ENGINE & SCHEMAS
+// =============================================================================
+const GROQ_TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'create_task',
+      description: 'Create a new workflow task for a client in the CA office ledger.',
+      parameters: {
+        type: 'object',
+        properties: {
+          clientName: { type: 'string', description: 'Name of the client firm or individual (e.g. Apex Logistics, Ram & Co)' },
+          clientCode: { type: 'string', description: 'Client ID / code if known, otherwise omitted or inferred' },
+          natureOfWork: { type: 'string', description: 'Work nature (e.g. GST Monthly Return, Income Tax Audit, TDS Filing, CMP-08 Filing)' },
+          dueDate: { type: 'string', description: 'Due date in YYYY-MM-DD format (e.g. 2026-10-20)' },
+          assessmentYear: { type: 'string', description: 'Assessment year/period (e.g. 2024-25), blank if GST' },
+          operator: { type: 'string', description: 'Staff username to assign this task to (e.g. rahul, priya)' }
+        },
+        required: ['clientName', 'natureOfWork', 'dueDate']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_task',
+      description: 'Update an existing task details like due date, assigned operator, status, or remarks.',
+      parameters: {
+        type: 'object',
+        properties: {
+          taskId: { type: 'number', description: 'Sequential Task ID (e.g. 10001)' },
+          dueDate: { type: 'string', description: 'New due date in YYYY-MM-DD format' },
+          operator: { type: 'string', description: 'New assigned staff username' },
+          currentStatus: { type: 'string', enum: ['Unassigned', 'Assigned', 'Pending Review', 'Approved', 'Filed', 'Rework'], description: 'New workflow status' },
+          reasonForPending: { type: 'string', description: 'Pending reason or remarks' }
+        },
+        required: ['taskId']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'delete_task',
+      description: 'Delete a task from the ledger. Requires partner/admin role.',
+      parameters: {
+        type: 'object',
+        properties: {
+          taskId: { type: 'number', description: 'Sequential Task ID to delete' }
+        },
+        required: ['taskId']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'advance_task_status',
+      description: 'Advance or transition the lifecycle status of a workflow task.',
+      parameters: {
+        type: 'object',
+        properties: {
+          taskId: { type: 'number', description: 'Sequential Task ID' },
+          targetStatus: { type: 'string', enum: ['Assigned', 'Pending Review', 'Approved', 'Filed', 'Rework'], description: 'Next status' },
+          reason: { type: 'string', description: 'Remarks or reason if marking Rework or Pending' },
+          operator: { type: 'string', description: 'Username if assigning' }
+        },
+        required: ['taskId', 'targetStatus']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_tasks',
+      description: 'Search, filter, or list tasks from the office workflow database.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search term for client name, work nature, or task ID' },
+          status: { type: 'string', description: 'Filter by status (Unassigned, Assigned, Pending Review, Approved, Filed, Rework)' },
+          operator: { type: 'string', description: 'Filter by assigned staff username' },
+          limit: { type: 'number', description: 'Maximum results to return (default 10)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'create_client',
+      description: 'Create/register a new client in the master database. Requires partner/admin role.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Full business or client name' },
+          pan: { type: 'string', description: '10-character PAN number' },
+          contact: { type: 'string', description: 'Primary phone/mobile number' },
+          email: { type: 'string', description: 'Email address' },
+          gstNumber: { type: 'string', description: '15-character GSTIN' },
+          gstStaff: { type: 'string', description: 'Default GST staff username' },
+          status: { type: 'string', enum: ['Active', 'Inactive'], description: 'Client status' }
+        },
+        required: ['name']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_client',
+      description: 'Update an existing client details. Requires partner/admin role.',
+      parameters: {
+        type: 'object',
+        properties: {
+          clientId: { type: 'number', description: 'Client ID number' },
+          name: { type: 'string', description: 'Updated client name' },
+          pan: { type: 'string', description: 'Updated PAN' },
+          contact: { type: 'string', description: 'Updated contact phone' },
+          email: { type: 'string', description: 'Updated email' },
+          gstNumber: { type: 'string', description: 'Updated GSTIN' },
+          status: { type: 'string', enum: ['Active', 'Inactive'] }
+        },
+        required: ['clientId']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'delete_client',
+      description: 'Delete a client and all their tasks. Requires partner/admin role.',
+      parameters: {
+        type: 'object',
+        properties: {
+          clientId: { type: 'number', description: 'Client ID number to delete' }
+        },
+        required: ['clientId']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_clients',
+      description: 'Search or list registered clients by name, PAN, phone, or status.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Client name, PAN, or phone number' },
+          status: { type: 'string', description: 'Active or Inactive' },
+          limit: { type: 'number', description: 'Max results to return (default 10)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'check_attendance',
+      description: 'Check attendance records (present/absent/on duty) for staff today or on a given date. NOTE: Clock-in/out cannot be performed here.',
+      parameters: {
+        type: 'object',
+        properties: {
+          date: { type: 'string', description: 'Date in YYYY-MM-DD format (default today)' },
+          username: { type: 'string', description: 'Optional username to check specific staff' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'mark_on_duty',
+      description: 'Mark a staff member as On Duty (OD) for a given date. Requires partner/admin role.',
+      parameters: {
+        type: 'object',
+        properties: {
+          username: { type: 'string', description: 'Staff username to mark On Duty' },
+          date: { type: 'string', description: 'Date in YYYY-MM-DD format (default today)' }
+        },
+        required: ['username']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_staff_recommendations',
+      description: 'Get smart workload-balanced staff recommendations for a task/nature of work.',
+      parameters: {
+        type: 'object',
+        properties: {
+          natureOfWork: { type: 'string', description: 'Nature of work (e.g. GST Monthly Return, Income Tax Audit)' },
+          limit: { type: 'number', description: 'Number of recommendations (default 3)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'run_compliance_automation',
+      description: 'Automatically generate recurring monthly GST compliance tasks for all active GST clients. Requires partner/admin role.',
+      parameters: {
+        type: 'object',
+        properties: {}
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_office_stats',
+      description: 'Get office workflow statistics, queue counts by status, client totals, and filing leaderboard.',
+      parameters: {
+        type: 'object',
+        properties: {}
+      }
+    }
+  }
+];
+
+async function callGroqChatCompletions(messages, tools, apiKey, model) {
+  const modelName = model || process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+  const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model: modelName,
+      messages,
+      ...(tools && tools.length > 0 ? { tools, tool_choice: 'auto' } : {}),
+      temperature: 0.1,
+      max_tokens: 1024
+    }),
+    signal: AbortSignal.timeout(15000)
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    throw new Error(`Groq API HTTP ${resp.status}: ${errText}`);
+  }
+
+  return await resp.json();
+}
+
+async function executeLlmToolCall(name, args, { db, decoded, isAdmin, allClients, allUsers }) {
+  const clientsCol = db.collection('clients');
+  const tasksCol = db.collection('tasks');
+  const attendanceCol = db.collection('attendance');
+  const usersCol = db.collection('users');
+
+  if (name === 'create_task') {
+    if (!isAdmin) return { success: false, error: 'Forbidden: Admins only can create tasks.' };
+    let cCode = String(args.clientCode || '').trim();
+    const cName = String(args.clientName || '').trim();
+    const nature = String(args.natureOfWork || '').trim();
+    const dueDate = args.dueDate || new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
+    const isGst = isGstWorkCheck(nature);
+    const ay = isGst ? '' : String(args.assessmentYear || '').trim();
+    const op = args.operator ? String(args.operator).trim().toLowerCase() : '';
+
+    if (!cName) return { success: false, error: 'Client name is required.' };
+    if (!nature) return { success: false, error: 'Nature of work is required.' };
+
+    if (!cCode) {
+      const matchC = findClientFuzzy(allClients, cName);
+      cCode = matchC ? String(matchC.id) : String(Math.floor(10000 + Math.random() * 90000));
+    }
+
+    const dup = await tasksCol.findOne({
+      clientCode: cCode,
+      natureOfWork: nature,
+      currentStatus: { $ne: 'Filed' },
+      ...(ay ? { assessmentYear: ay } : {})
+    });
+    if (dup) {
+      return { success: false, duplicate: true, existingTaskId: dup.id, message: `Duplicate: Active task #${dup.id} already exists for ${cName} (${nature}).` };
+    }
+
+    const nextId = await getNextTaskId(tasksCol);
+    const nowStr = new Date().toISOString().split('T')[0];
+    const newTask = {
+      id: nextId,
+      clientCode: cCode,
+      clientName: cName,
+      natureOfWork: nature,
+      assessmentYear: ay,
+      dateReceived: nowStr,
+      dueDate,
+      currentStatus: op ? 'Assigned' : 'Unassigned',
+      workTakenBy: op,
+      workTakenOn: op ? nowStr : '',
+      sendBackCount: 0,
+      reasonForPending: ''
+    };
+    await tasksCol.insertOne(newTask);
+    await logAuditAction(db, decoded.username, 'CREATE_TASK_LLM', { taskId: nextId, clientName: cName });
+    return { success: true, taskId: nextId, task: newTask };
+  }
+
+  if (name === 'update_task') {
+    const tId = parseInt(args.taskId);
+    if (!tId) return { success: false, error: 'Task ID is required' };
+    const task = await tasksCol.findOne({ id: tId });
+    if (!task) return { success: false, error: `Task #${tId} not found` };
+
+    const updates = {};
+    if (args.dueDate) updates.dueDate = args.dueDate;
+    if (args.operator !== undefined) {
+      updates.workTakenBy = String(args.operator).trim().toLowerCase();
+      if (updates.workTakenBy && task.currentStatus === 'Unassigned') {
+        updates.currentStatus = 'Assigned';
+        updates.workTakenOn = new Date().toISOString().split('T')[0];
+      }
+    }
+    if (args.currentStatus) updates.currentStatus = args.currentStatus;
+    if (args.reasonForPending !== undefined) updates.reasonForPending = args.reasonForPending;
+
+    await tasksCol.updateOne({ _id: task._id }, { $set: updates });
+    const updated = await tasksCol.findOne({ _id: task._id });
+    await logAuditAction(db, decoded.username, 'UPDATE_TASK_LLM', { taskId: tId, updates });
+    return { success: true, taskId: tId, task: updated };
+  }
+
+  if (name === 'delete_task') {
+    if (!isAdmin) return { success: false, error: 'Forbidden: Admins only can delete tasks.' };
+    const tId = parseInt(args.taskId);
+    if (!tId) return { success: false, error: 'Task ID is required' };
+    const resDel = await tasksCol.deleteOne({ id: tId });
+    if (resDel.deletedCount === 0) return { success: false, error: `Task #${tId} not found.` };
+    await logAuditAction(db, decoded.username, 'DELETE_TASK_LLM', { taskId: tId });
+    return { success: true, deletedTaskId: tId };
+  }
+
+  if (name === 'advance_task_status') {
+    const tId = parseInt(args.taskId);
+    const targetStatus = args.targetStatus;
+    if (!tId || !targetStatus) return { success: false, error: 'Task ID and targetStatus are required' };
+    const task = await tasksCol.findOne({ id: tId });
+    if (!task) return { success: false, error: `Task #${tId} not found` };
+
+    if (['Approved', 'Filed'].includes(targetStatus) && !isAdmin) {
+      return { success: false, error: 'Forbidden: Partner/admin role required for approval or filing.' };
+    }
+
+    const updates = { currentStatus: targetStatus };
+    const today = new Date().toISOString().split('T')[0];
+    if (targetStatus === 'Filed') updates.fileDate = today;
+    if (targetStatus === 'Rework') {
+      updates.sendBackCount = (task.sendBackCount || 0) + 1;
+      if (args.reason) updates.reasonForPending = args.reason;
+    }
+    if (args.operator) {
+      updates.workTakenBy = String(args.operator).trim().toLowerCase();
+      updates.workTakenOn = today;
+    }
+
+    await tasksCol.updateOne({ _id: task._id }, { $set: updates });
+    const updated = await tasksCol.findOne({ _id: task._id });
+    await logAuditAction(db, decoded.username, 'STATUS_ADVANCE_LLM', { taskId: tId, targetStatus });
+    return { success: true, taskId: tId, previousStatus: task.currentStatus, currentStatus: targetStatus, task: updated };
+  }
+
+  if (name === 'search_tasks') {
+    const filter = {};
+    if (args.status) filter.currentStatus = args.status;
+    if (args.operator) filter.workTakenBy = String(args.operator).trim().toLowerCase();
+    if (args.query) {
+      const q = String(args.query).trim();
+      const numQ = parseInt(q.replace(/^#/, ''));
+      if (!isNaN(numQ)) {
+        filter.$or = [{ id: numQ }, { clientCode: String(numQ) }];
+      } else {
+        filter.$or = [
+          { clientName: { $regex: q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
+          { natureOfWork: { $regex: q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } }
+        ];
+      }
+    }
+    const limit = Math.min(args.limit || 10, 20);
+    const list = await tasksCol.find(filter).sort({ dueDate: 1 }).limit(limit).toArray();
+    return {
+      success: true,
+      count: list.length,
+      tasks: list.map(t => ({
+        id: t.id,
+        clientCode: t.clientCode,
+        clientName: t.clientName,
+        natureOfWork: t.natureOfWork,
+        currentStatus: t.currentStatus,
+        workTakenBy: t.workTakenBy || 'Unassigned',
+        dueDate: t.dueDate
+      }))
+    };
+  }
+
+  if (name === 'create_client') {
+    if (!isAdmin) return { success: false, error: 'Forbidden: Admins only can create clients.' };
+    const cName = String(args.name || '').trim();
+    if (!cName) return { success: false, error: 'Client name is required.' };
+
+    const highest = await clientsCol.find({ id: { $type: 'number' } }).sort({ id: -1 }).limit(1).toArray();
+    const nextCId = (highest.length > 0 && typeof highest[0].id === 'number') ? highest[0].id + 1 : 101;
+
+    const newClient = {
+      id: nextCId,
+      name: cName,
+      pan: (args.pan || '').toUpperCase().trim(),
+      contact: args.contact || '',
+      email: args.email || '',
+      gstNumber: (args.gstNumber || '').toUpperCase().trim(),
+      gstStaff: args.gstStaff || '',
+      status: args.status || 'Active'
+    };
+    await clientsCol.insertOne(newClient);
+    await logAuditAction(db, decoded.username, 'CREATE_CLIENT_LLM', { clientId: nextCId, name: cName });
+    return { success: true, clientId: nextCId, client: newClient };
+  }
+
+  if (name === 'update_client') {
+    if (!isAdmin) return { success: false, error: 'Forbidden: Admins only can update clients.' };
+    const cId = parseInt(args.clientId);
+    if (!cId) return { success: false, error: 'Client ID is required.' };
+    const client = await clientsCol.findOne({ id: cId });
+    if (!client) return { success: false, error: `Client #${cId} not found.` };
+
+    const updates = {};
+    if (args.name) updates.name = args.name.trim();
+    if (args.pan !== undefined) updates.pan = args.pan.toUpperCase().trim();
+    if (args.contact !== undefined) updates.contact = args.contact;
+    if (args.email !== undefined) updates.email = args.email;
+    if (args.gstNumber !== undefined) updates.gstNumber = args.gstNumber.toUpperCase().trim();
+    if (args.status) updates.status = args.status;
+
+    await clientsCol.updateOne({ _id: client._id }, { $set: updates });
+    const updated = await clientsCol.findOne({ _id: client._id });
+    await logAuditAction(db, decoded.username, 'UPDATE_CLIENT_LLM', { clientId: cId, updates });
+    return { success: true, clientId: cId, client: updated };
+  }
+
+  if (name === 'delete_client') {
+    if (!isAdmin) return { success: false, error: 'Forbidden: Admins only can delete clients.' };
+    const cId = parseInt(args.clientId);
+    if (!cId) return { success: false, error: 'Client ID is required.' };
+    const client = await clientsCol.findOne({ id: cId });
+    if (!client) return { success: false, error: `Client #${cId} not found.` };
+
+    await clientsCol.deleteOne({ id: cId });
+    await tasksCol.deleteMany({ clientCode: String(cId) });
+    await logAuditAction(db, decoded.username, 'DELETE_CLIENT_LLM', { clientId: cId, clientName: client.name });
+    return { success: true, deletedClientId: cId, clientName: client.name };
+  }
+
+  if (name === 'search_clients') {
+    const filter = {};
+    if (args.status) filter.status = args.status;
+    if (args.query) {
+      const q = String(args.query).trim();
+      const numQ = parseInt(q);
+      if (!isNaN(numQ)) {
+        filter.$or = [{ id: numQ }, { pan: { $regex: q, $options: 'i' } }];
+      } else {
+        filter.$or = [
+          { name: { $regex: q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
+          { pan: { $regex: q, $options: 'i' } },
+          { contact: { $regex: q, $options: 'i' } }
+        ];
+      }
+    }
+    const limit = Math.min(args.limit || 10, 20);
+    const list = await clientsCol.find(filter).limit(limit).toArray();
+    return {
+      success: true,
+      count: list.length,
+      clients: list.map(c => ({ id: c.id, name: c.name, pan: c.pan || 'N/A', contact: c.contact || 'N/A', gstNumber: c.gstNumber || 'N/A', status: c.status || 'Active' }))
+    };
+  }
+
+  if (name === 'check_attendance') {
+    const dateStr = args.date || getISTDateDetails().dateStr;
+    const filter = { date: dateStr };
+    if (args.username) filter.username = String(args.username).trim().toLowerCase();
+    const records = await attendanceCol.find(filter).toArray();
+    return {
+      success: true,
+      date: dateStr,
+      count: records.length,
+      records: records.map(r => ({
+        username: r.username,
+        name: r.name,
+        role: r.role,
+        status: r.status,
+        clockIn: r.clockIn ? new Date(r.clockIn).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '-',
+        clockOut: r.clockOut ? new Date(r.clockOut).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '-'
+      }))
+    };
+  }
+
+  if (name === 'mark_on_duty') {
+    if (!isAdmin) return { success: false, error: 'Forbidden: Admins only can mark On Duty.' };
+    const targetUser = String(args.username || '').trim().toLowerCase();
+    const userDoc = await usersCol.findOne({ username: targetUser });
+    if (!userDoc) return { success: false, error: `User @${targetUser} not found.` };
+    const dateStr = args.date || getISTDateDetails().dateStr;
+
+    await attendanceCol.updateOne(
+      { username: targetUser, date: dateStr },
+      { $set: { status: 'On Duty', name: userDoc.name, role: userDoc.role } },
+      { upsert: true }
+    );
+    await logAuditAction(db, decoded.username, 'MARK_OD_LLM', { username: targetUser, date: dateStr });
+    return { success: true, username: targetUser, date: dateStr, status: 'On Duty' };
+  }
+
+  if (name === 'get_staff_recommendations') {
+    const recommendations = await computeRecommendations(db, args.natureOfWork || '');
+    const limit = Math.min(args.limit || 3, 5);
+    return {
+      success: true,
+      natureOfWork: args.natureOfWork || 'General',
+      topRecommendations: recommendations.slice(0, limit)
+    };
+  }
+
+  if (name === 'run_compliance_automation') {
+    if (!isAdmin) return { success: false, error: 'Forbidden: Admins only can run compliance automations.' };
+    const now = new Date();
+    const currentMonth = String(now.getMonth() + 1).padStart(2, '0');
+    const currentYear = now.getFullYear();
+    const currentPeriod = `${currentYear}-${currentMonth}`;
+
+    const gstClients = await clientsCol.find({
+      status: { $ne: 'Inactive' },
+      gstNumber: { $exists: true, $ne: '' }
+    }).limit(50).toArray();
+
+    const existingTasks = await tasksCol.find({
+      natureOfWork: 'GST Monthly Return',
+      assessmentYear: currentPeriod
+    }).toArray();
+    const existingClientCodes = new Set(existingTasks.map(t => String(t.clientCode)));
+
+    const tasksToInsert = [];
+    const today = new Date().toISOString().split('T')[0];
+    let nextTaskId = await getNextTaskId(tasksCol);
+
+    for (const c of gstClients) {
+      if (!existingClientCodes.has(String(c.id))) {
+        tasksToInsert.push({
+          id: nextTaskId++,
+          clientCode: String(c.id),
+          clientName: c.name,
+          natureOfWork: 'GST Monthly Return',
+          assessmentYear: currentPeriod,
+          dateReceived: today,
+          dueDate: `${currentYear}-${currentMonth}-20`,
+          currentStatus: c.gstStaff ? 'Assigned' : 'Unassigned',
+          workTakenBy: c.gstStaff || '',
+          workTakenOn: c.gstStaff ? today : '',
+          sendBackCount: 0,
+          reasonForPending: ''
+        });
+      }
+    }
+
+    if (tasksToInsert.length > 0) {
+      await tasksCol.insertMany(tasksToInsert);
+      await logAuditAction(db, decoded.username, 'AUTO_GST_LLM', { count: tasksToInsert.length });
+    }
+    return { success: true, period: currentPeriod, createdCount: tasksToInsert.length };
+  }
+
+  if (name === 'get_office_stats') {
+    const totalTasks = await tasksCol.countDocuments({});
+    const statusCounts = await tasksCol.aggregate([
+      { $group: { _id: '$currentStatus', count: { $sum: 1 } } }
+    ]).toArray();
+    const sMap = {};
+    statusCounts.forEach(s => { sMap[s._id] = s.count; });
+    const totalClients = await clientsCol.countDocuments({});
+    const totalUsers = await usersCol.countDocuments({});
+    const leaderboard = await tasksCol.aggregate([
+      { $match: { currentStatus: 'Filed' } },
+      { $group: { _id: '$workTakenBy', totalFiled: { $sum: 1 } } },
+      { $sort: { totalFiled: -1 } },
+      { $limit: 5 }
+    ]).toArray();
+
+    return {
+      success: true,
+      totalTasks,
+      statusBreakdown: sMap,
+      totalClients,
+      totalUsers,
+      leaderboard: leaderboard.map(l => ({ username: l._id || 'unassigned', totalFiled: l.totalFiled }))
+    };
+  }
+
+  return { success: false, error: `Unknown tool: ${name}` };
+}
+
+async function handleGroqLlmChatTurn(req, res, { db, decoded, isAdmin, allClients, allUsers, query, history }) {
+  const apiKey = process.env.GROQ_API_KEY;
+  const model = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+
+  const systemPrompt = `You are the intelligent AI Office Workflow Assistant for a Chartered Accountant (CA) firm.
+Current Date (IST): ${getISTDateDetails().dateStr}
+Current User: ${decoded.username} (${decoded.role})
+Firm Administrative Privileges: ${isAdmin ? 'Full Partner Admin' : 'Staff / Article'}
+
+You manage clients, workflow tasks, staff assignments, status pipelines, attendance checks, and compliance automations.
+Task Status Stages in Order:
+1. "Unassigned" -> 2. "Assigned" -> 3. "Pending Review" -> 4. "Approved" -> 5. "Filed" (or "Rework" if sent back).
+
+CRITICAL POLICY & SECURITY RULES:
+1. ATTENDANCE CLOCK-IN / PUNCH-IN / CLOCK-OUT:
+   - Attendance Clock-In and Clock-Out CANNOT be performed via Chatbot.
+   - If the user asks to clock in, punch in, clock out, or punch out, politely refuse and instruct them to use the camera scanner on the Attendance tab.
+   - You CAN check attendance (who is present/absent) and mark On Duty (OD) for field work.
+2. PARTNER PRIVILEGES:
+   - Creating/deleting clients, deleting tasks, approving tasks, marking On Duty, and running bulk automations require Partner role.
+3. TASK IDENTIFIERS:
+   - Task IDs are 5-digit numbers starting at #10001 (e.g. #10001, #10002).
+   - Client IDs are numbers like 101, 45422.
+   - Always refer to tasks with their proper Task ID badge like #10001.
+4. TONE & FORMAT:
+   - Be concise, direct, professional, and clear.
+   - Use Markdown formatting: bold for names/statuses, bullet lists for multiple items, code blocks for IDs/PAN.
+   - Execute tools when requested to perform actions or search information. If multiple tools are needed (e.g. search client then create task), call them in order.`;
+
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    ...(history || []).slice(-6).map(m => ({
+      role: m.role === 'user' ? 'user' : 'assistant',
+      content: String(m.content || '')
+    }))
+  ];
+
+  if (messages.length === 1 || messages[messages.length - 1].role !== 'user') {
+    messages.push({ role: 'user', content: query });
+  }
+
+  // 1st LLM call
+  const firstData = await callGroqChatCompletions(messages, GROQ_TOOLS, apiKey, model);
+  const choice = firstData?.choices?.[0];
+  if (!choice || !choice.message) {
+    throw new Error('Invalid response structure from Groq API');
+  }
+
+  const assistantMsg = choice.message;
+  const toolCalls = assistantMsg.tool_calls;
+
+  let lastTask = null;
+  let lastClient = null;
+  let lastAttendance = null;
+  const chips = [];
+
+  if (toolCalls && toolCalls.length > 0) {
+    messages.push(assistantMsg);
+
+    for (const call of toolCalls) {
+      let args = {};
+      try {
+        args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments) : (call.function.arguments || {});
+      } catch (_) {
+        args = {};
+      }
+
+      const toolResult = await executeLlmToolCall(call.function.name, args, { db, decoded, isAdmin, allClients, allUsers });
+
+      if (toolResult.task) {
+        lastTask = toolResult.task;
+        chips.push({ label: `⚙️ Manage #${toolResult.task.id}`, action: 'advance_status', params: { taskId: toolResult.task.id } });
+      }
+      if (toolResult.client) {
+        lastClient = toolResult.client;
+        chips.push({ label: `🏢 View Client #${toolResult.client.id}`, action: 'view_clients', params: {} });
+      }
+      if (toolResult.attendance || call.function.name === 'check_attendance') {
+        lastAttendance = toolResult;
+        chips.push({ label: '🕒 Open Attendance Tab', action: 'view_attendance', params: {} });
+      }
+      if (call.function.name === 'get_staff_recommendations') {
+        chips.push({ label: '⭐ Recommend Staff', action: 'recommend_staff', params: { limit: 3 } });
+      }
+
+      messages.push({
+        role: 'tool',
+        tool_call_id: call.id,
+        content: JSON.stringify(toolResult)
+      });
+    }
+
+    // 2nd LLM call for conversational summary
+    const secondData = await callGroqChatCompletions(messages, null, apiKey, model);
+    const finalContent = secondData?.choices?.[0]?.message?.content || 'Action processed successfully.';
+
+    if (chips.length === 0) {
+      chips.push({ label: '📋 View All Tasks', action: 'view_tasks', params: {} });
+      chips.push({ label: '🏢 View All Clients', action: 'view_clients', params: {} });
+    }
+
+    return res.status(200).json({
+      success: true,
+      reply: finalContent,
+      chips: chips.slice(0, 6),
+      task: lastTask,
+      client: lastClient,
+      attendance: lastAttendance,
+      context: null
+    });
+  }
+
+  // No tools called - direct conversational reply
+  const replyContent = assistantMsg.content || 'I am ready to help you with tasks, clients, and attendance.';
+  const defaultChips = [
+    { label: '➕ Create Task', action: 'prompt_text', text: 'Create a new task' },
+    { label: '📋 View All Tasks', action: 'view_tasks', params: {} },
+    { label: '🏢 View All Clients', action: 'view_clients', params: {} },
+    { label: '🕒 Check Attendance', action: 'view_attendance', params: {} }
+  ];
+
+  return res.status(200).json({
+    success: true,
+    reply: replyContent,
+    chips: defaultChips,
+    context: null
+  });
+}
+
+// =============================================================================
 // MAIN CHATBOT ROUTE DISPATCHER
 // =============================================================================
 module.exports = async (req, res) => {
@@ -608,6 +1296,7 @@ module.exports = async (req, res) => {
       action = '',
       context = null,
       history = [],
+      engine = 'groq',
       // Task params
       taskId,
       clientCode,
@@ -1420,6 +2109,33 @@ module.exports = async (req, res) => {
     // =========================================================================
     // SECTION B: CONVERSATIONAL MULTI-TURN AI DIALOG ENGINE
     // =========================================================================
+
+    // Universal Attendance Clock-In / Clock-Out Block (Never permitted via Chat)
+    if (/\b(?:clock\s*in|punch\s*in|clock\s*out|punch\s*out)\b/i.test(queryLower)) {
+      const isClockIn = /\b(?:clock\s*in|punch\s*in)\b/i.test(queryLower);
+      return res.status(200).json({
+        success: false,
+        reply: `⚠️ **Attendance ${isClockIn ? 'Clock-In' : 'Clock-Out'} cannot be performed via Chat.**\n\nPlease use the **Attendance** tab or biometric camera kiosk to ${isClockIn ? 'punch in' : 'punch out'}.`,
+        context: null,
+        chips: [
+          { label: '🕒 Open Attendance Tab', action: 'view_attendance', params: {} },
+          { label: '👥 Who is Present Today?', action: 'prompt_text', text: 'Who is present today?' }
+        ]
+      });
+    }
+
+    // Engine Selector: Groq AI (LLM) vs Classic Pattern
+    if (engine !== 'pattern') {
+      const groqApiKey = process.env.GROQ_API_KEY;
+      if (groqApiKey) {
+        try {
+          return await handleGroqLlmChatTurn(req, res, { db, decoded, isAdmin, allClients, allUsers, query, history });
+        } catch (llmErr) {
+          console.error('Groq LLM Engine error (falling back to Classic Pattern):', llmErr.message);
+          // Fall back seamlessly to Classic Pattern engine below
+        }
+      }
+    }
 
     // B0. Conversational Reset Check
     if (/^(?:cancel|reset|stop|start\s+over|nevermind)\b/i.test(queryLower)) {

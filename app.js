@@ -2355,6 +2355,19 @@ function selectRecommendedOperator(username) {
 // ==========================================
 let currentChatSessionContext = null;
 let chatMessageHistory = [];
+let currentChatEngine = localStorage.getItem('ca_chat_engine') || 'groq';
+
+function getActiveChatEngine() {
+    return currentChatEngine || 'groq';
+}
+
+function handleChatEngineChange(val) {
+    currentChatEngine = val;
+    localStorage.setItem('ca_chat_engine', val);
+    const engineName = val === 'groq' ? '⚡ Groq AI (LLM)' : '⚙️ Classic Pattern';
+    appendBotMessage(`Switched chat engine to **${engineName}**.`);
+}
+window.handleChatEngineChange = handleChatEngineChange;
 
 function toggleChatbot(shouldShow) {
     const windowEl = document.getElementById('chatbotWindow');
@@ -2367,6 +2380,8 @@ function toggleChatbot(shouldShow) {
         windowEl.classList.toggle('hidden');
     }
     if (!windowEl.classList.contains('hidden')) {
+        const selector = document.getElementById('chatEngineSelector');
+        if (selector) selector.value = getActiveChatEngine();
         document.getElementById('chatInputText')?.focus();
     }
 }
@@ -2462,6 +2477,7 @@ async function executeChatAction(action, params = {}, actionLabel = '') {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 action,
+                engine: getActiveChatEngine(),
                 context: currentChatSessionContext,
                 history: chatMessageHistory,
                 ...params
@@ -2529,10 +2545,15 @@ async function handleChatSubmit(e) {
     if (chatMessageHistory.length > 10) chatMessageHistory = chatMessageHistory.slice(-10);
 
     // Add loading indicator
+    const activeEngine = getActiveChatEngine();
+    const loadingText = activeEngine === 'groq'
+        ? '⚡ Groq AI analyzing workflow & reasoning...'
+        : 'Searching records & analyzing workflow...';
+
     const loadingDiv = document.createElement('div');
     loadingDiv.className = 'chat-msg bot';
     loadingDiv.id = 'chatLoadingBubble';
-    loadingDiv.innerText = 'Searching records & analyzing workflow...';
+    loadingDiv.innerText = loadingText;
     msgList.appendChild(loadingDiv);
     msgList.scrollTop = msgList.scrollHeight;
 
@@ -2542,6 +2563,7 @@ async function handleChatSubmit(e) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 message: query,
+                engine: activeEngine,
                 context: currentChatSessionContext,
                 history: chatMessageHistory
             })
