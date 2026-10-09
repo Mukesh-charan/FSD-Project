@@ -85,6 +85,15 @@ async function fetchAndRenderTasks() {
         statusFilter = 'Filed';
         operatorFilter = currentUserSession.username;
     }
+    else if (activeTab === 'clientActive') {
+        statusFilter = 'Unassigned,Assigned,Approved';
+    }
+    else if (activeTab === 'clientPending') {
+        statusFilter = 'Pending Review';
+    }
+    else if (activeTab === 'clientClosed') {
+        statusFilter = 'Filed';
+    }
 
     if (selectedOperatorFilter !== 'ALL' && currentUserSession.role === 'partner') {
         operatorFilter = selectedOperatorFilter;
@@ -477,9 +486,359 @@ function toggleStaffTaskModal(shouldShow) {
     }
 }
 
+function selectClientRecommendedService(engName) {
+    const natureSelect = document.getElementById('clientTaskNatureSelect');
+    if (!natureSelect) return;
+    natureSelect.value = engName;
+    handleClientNatureChange();
+
+    const ayInput = document.getElementById('clientTaskAssessmentYear');
+    const dueInput = document.getElementById('clientTaskDueDate');
+    const now = new Date();
+    const currYear = now.getFullYear();
+    const isPastMarch = (now.getMonth() + 1) >= 4;
+    const defaultAY = isPastMarch ? `${currYear + 1}-${String(currYear + 2).slice(-2)}` : `${currYear}-${String(currYear + 1).slice(-2)}`;
+
+    const lower = engName.toLowerCase();
+    if (lower.includes('itr') || lower.includes('income tax')) {
+        if (ayInput) ayInput.value = defaultAY;
+        if (dueInput) dueInput.value = `${currYear}-07-31`;
+    } else if (lower.includes('gstr 3b')) {
+        const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 20);
+        if (dueInput) dueInput.value = nextMonth.toISOString().split('T')[0];
+    } else if (lower.includes('gstr 1')) {
+        const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 11);
+        if (dueInput) dueInput.value = nextMonth.toISOString().split('T')[0];
+    } else if (lower.includes('tax audit') || lower.includes('statutory audit')) {
+        if (ayInput) ayInput.value = defaultAY;
+        if (dueInput) dueInput.value = `${currYear}-09-30`;
+    }
+
+    document.querySelectorAll('.client-rec-chip').forEach(c => {
+        if (c.getAttribute('data-eng') === engName) {
+            c.style.backgroundColor = 'var(--primary-color)';
+            c.style.color = '#fff';
+            c.style.borderColor = 'var(--primary-color)';
+        } else {
+            c.style.backgroundColor = '#f1f5f9';
+            c.style.color = '#334155';
+            c.style.borderColor = '#cbd5e1';
+        }
+    });
+}
+
+function handleClientTaskFileSelection(e) {
+    const preview = document.getElementById('clientTaskFilesPreview');
+    if (!preview) return;
+    preview.innerHTML = '';
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    if (files.length === 0) return;
+
+    files.forEach(f => {
+        const item = document.createElement('div');
+        item.style.cssText = 'display:flex; justify-content:space-between; align-items:center; background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; padding:0.35rem 0.6rem; font-size:0.8rem;';
+        const sizeKb = (f.size / 1024).toFixed(1);
+        item.innerHTML = `
+            <div style="display:flex; align-items:center; gap:0.4rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                <span>📎</span>
+                <span style="font-weight:600; color:#334155;">${f.name}</span>
+                <span style="color:#94a3b8; font-size:0.75rem;">(${sizeKb} KB)</span>
+            </div>
+            <span style="color:#10b981; font-weight:600; font-size:0.75rem;">Ready to upload</span>
+        `;
+        preview.appendChild(item);
+    });
+}
+window.handleClientTaskFileSelection = handleClientTaskFileSelection;
+
+function toggleClientTaskModal(shouldShow) {
+    const overlay = document.getElementById('clientTaskModalOverlay');
+    if (!overlay) return;
+    const fileInput = document.getElementById('clientTaskFileInput');
+    if (fileInput) fileInput.value = '';
+    const preview = document.getElementById('clientTaskFilesPreview');
+    if (preview) preview.innerHTML = '';
+    if (shouldShow) {
+        overlay.classList.remove('hidden');
+        const clientDisplay = document.getElementById('clientTaskClientDisplay');
+        if (clientDisplay) {
+            clientDisplay.value = `${currentUserSession.name} (#${currentUserSession.clientId || ''})`;
+        }
+
+        const chipsContainer = document.getElementById('clientTaskChipsContainer');
+        if (chipsContainer) {
+            chipsContainer.innerHTML = '';
+            const recEngs = (engagementMaster && engagementMaster.length > 0) ? engagementMaster : [
+                'Income Tax Return (ITR)',
+                'GSTR 3B',
+                'GSTR 1',
+                'Statutory Audit',
+                'Tax Audit (3CD)',
+                'TDS Quarterly Filing'
+            ];
+            recEngs.forEach(eng => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'client-rec-chip';
+                btn.setAttribute('data-eng', eng);
+                btn.innerText = eng;
+                btn.style.cssText = 'padding: 0.3rem 0.65rem; font-size: 0.8rem; font-weight: 500; border-radius: 9999px; border: 1px solid #cbd5e1; background: #f1f5f9; color: #334155; cursor: pointer; transition: all 0.15s ease;';
+                btn.onclick = () => selectClientRecommendedService(eng);
+                chipsContainer.appendChild(btn);
+            });
+        }
+
+        const natureSelect = document.getElementById('clientTaskNatureSelect');
+        if (natureSelect) {
+            natureSelect.innerHTML = '';
+            const list = (engagementMaster && engagementMaster.length > 0) ? engagementMaster : [
+                'Income Tax Return (ITR)',
+                'GSTR 3B',
+                'GSTR 1',
+                'Statutory Audit',
+                'Tax Audit (3CD)',
+                'TDS Quarterly Filing'
+            ];
+            list.forEach(eng => {
+                const opt = document.createElement('option');
+                opt.value = eng;
+                opt.textContent = eng;
+                natureSelect.appendChild(opt);
+            });
+        }
+        const opSelect = document.getElementById('clientTaskOperatorSelect');
+        if (opSelect) {
+            opSelect.innerHTML = '<option value="">-- Office Pool (Unassigned) --</option>';
+            usersDB.filter(u => ['staff', 'article', 'partner'].includes(u.role)).forEach(u => {
+                const opt = document.createElement('option');
+                opt.value = u.username;
+                opt.textContent = `${u.name} (${u.role.toUpperCase()})`;
+                opSelect.appendChild(opt);
+            });
+        }
+        const dueInput = document.getElementById('clientTaskDueDate');
+        if (dueInput && !dueInput.value) {
+            const nextWeek = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+            dueInput.value = nextWeek.toISOString().split('T')[0];
+        }
+        handleClientNatureChange();
+    } else {
+        overlay.classList.add('hidden');
+    }
+}
+
+async function handleClientTaskCancellation(taskId) {
+    if (!confirm(`Are you sure you want to cancel and delete Task #${taskId}?`)) {
+        return;
+    }
+    showSpinner("Cancelling task...");
+    try {
+        const res = await authFetch(`/api/tasks?id=${taskId}`, {
+            method: 'DELETE'
+        }).then(r => r.json());
+        hideSpinner();
+        if (res.success) {
+            alert("Task cancelled and deleted successfully.");
+            await fetchAndRenderTasks();
+        } else {
+            alert(res.message || "Failed to cancel task.");
+        }
+    } catch (e) {
+        hideSpinner();
+        console.error("Cancel task error:", e);
+        alert("Connection error while cancelling task.");
+    }
+}
+
+function handleClientNatureChange() {
+    const natureSelect = document.getElementById('clientTaskNatureSelect');
+    const ayGroup = document.getElementById('clientTaskAyGroup');
+    if (!natureSelect || !ayGroup) return;
+    const isGst = /gst|cmp/i.test(natureSelect.value);
+    ayGroup.style.display = isGst ? 'none' : 'block';
+    fetchClientStaffRecommendations();
+}
+
+let _clientStaffRecDebounce = null;
+async function fetchClientStaffRecommendations() {
+    clearTimeout(_clientStaffRecDebounce);
+    _clientStaffRecDebounce = setTimeout(async () => {
+        const natureSelect = document.getElementById('clientTaskNatureSelect');
+        const recList = document.getElementById('clientTaskStaffRecList');
+        const statusSpan = document.getElementById('clientStaffRecStatus');
+        if (!recList) return;
+
+        const nature = natureSelect ? natureSelect.value : '';
+        if (statusSpan) statusSpan.innerText = 'Analyzing expertise...';
+        recList.innerHTML = '<div style="font-size:0.75rem; color:#94a3b8; font-style:italic;">Calculating best matches...</div>';
+
+        try {
+            const res = await authFetch(`/api/recommend?natureOfWork=${encodeURIComponent(nature)}&limit=3`).then(r => r.json());
+            if (res.success && res.recommendations && res.recommendations.length > 0) {
+                if (statusSpan) statusSpan.innerText = `${res.recommendations.length} recommended`;
+                recList.innerHTML = '';
+                const currentVal = document.getElementById('clientTaskOperatorSelect')?.value || '';
+
+                res.recommendations.forEach((rec, idx) => {
+                    const isSelected = rec.username === currentVal;
+                    const card = document.createElement('div');
+                    card.className = `client-staff-rec-card ${isSelected ? 'selected-rec' : ''}`;
+                    card.setAttribute('data-username', rec.username);
+                    card.style.cssText = `display:flex; justify-content:space-between; align-items:center; padding:0.4rem 0.6rem; border-radius:6px; border:1px solid ${isSelected ? 'var(--primary-color)' : '#e2e8f0'}; background:${isSelected ? '#eff6ff' : '#ffffff'}; cursor:pointer; transition:all 0.15s ease;`;
+                    card.onclick = () => selectClientRecommendedOperator(rec.username);
+
+                    card.innerHTML = `
+                        <div>
+                            <div style="font-size:0.8rem; font-weight:600; color:var(--primary-color);">
+                                ${rec.name} <span style="font-weight:400; color:#64748b; font-size:0.72rem;">(@${rec.username})</span>
+                            </div>
+                            <div style="font-size:0.7rem; color:#64748b; margin-top:1px;">
+                                ${rec.reasons && rec.reasons.length ? rec.reasons.slice(0, 2).join(' • ') : 'Experienced & available'}
+                            </div>
+                        </div>
+                        <div style="font-size:0.75rem; font-weight:700; color:${idx === 0 ? '#16a34a' : 'var(--secondary-color)'}; background:${idx === 0 ? '#dcfce7' : '#f1f5f9'}; padding:2px 6px; border-radius:9999px;">
+                            ${rec.score}% Match
+                        </div>
+                    `;
+                    recList.appendChild(card);
+                });
+            } else {
+                if (statusSpan) statusSpan.innerText = 'Standard pool';
+                recList.innerHTML = '<div style="font-size:0.75rem; color:#94a3b8; padding:0.2rem;">Office pool available.</div>';
+            }
+        } catch (e) {
+            console.warn('Failed to load client staff recommendations:', e);
+            if (statusSpan) statusSpan.innerText = '';
+            recList.innerHTML = '';
+        }
+    }, 150);
+}
+
+function selectClientRecommendedOperator(username) {
+    const opSelect = document.getElementById('clientTaskOperatorSelect');
+    if (opSelect) {
+        opSelect.value = username;
+    }
+    highlightSelectedClientStaff(username);
+}
+
+function highlightSelectedClientStaff(username) {
+    document.querySelectorAll('.client-staff-rec-card').forEach(card => {
+        if (card.getAttribute('data-username') === username) {
+            card.style.border = '1px solid var(--primary-color)';
+            card.style.backgroundColor = '#eff6ff';
+        } else {
+            card.style.border = '1px solid #e2e8f0';
+            card.style.backgroundColor = '#ffffff';
+        }
+    });
+}
+
+async function handleClientTaskSubmission(e) {
+    e.preventDefault();
+    const natureOfWork = document.getElementById('clientTaskNatureSelect').value;
+    const ay = document.getElementById('clientTaskAssessmentYear').value.trim();
+    const operator = document.getElementById('clientTaskOperatorSelect').value;
+    const dueDate = document.getElementById('clientTaskDueDate').value;
+    const fileInput = document.getElementById('clientTaskFileInput');
+    const selectedFiles = fileInput && fileInput.files ? Array.from(fileInput.files) : [];
+
+    if (!natureOfWork || !dueDate) {
+        alert("Please provide the service type and target due date.");
+        return;
+    }
+
+    for (const f of selectedFiles) {
+        if (f.size > 3.5 * 1024 * 1024) {
+            alert(`File "${f.name}" exceeds the 3.5MB limit. Please choose a smaller file.`);
+            return;
+        }
+    }
+
+    showSpinner(selectedFiles.length > 0 ? "Registering task & uploading documents to Drive..." : "Submitting request...");
+    try {
+        const res = await authFetch('/api/tasks', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                natureOfWork,
+                assessmentYear: ay,
+                operator,
+                dueDate
+            })
+        }).then(r => r.json());
+
+        if (!res.success) {
+            hideSpinner();
+            alert(res.message || "Failed to submit task.");
+            return;
+        }
+
+        const createdTaskId = res.task ? res.task.id : null;
+
+        if (selectedFiles.length > 0 && createdTaskId) {
+            let uploadFy = null;
+            if (ay) {
+                const m = ay.match(/(20\d{2})/);
+                if (m) {
+                    const startYear = parseInt(m[1], 10) - 1;
+                    uploadFy = `${startYear}-${String((startYear + 1) % 100).padStart(2, '0')}`;
+                }
+            }
+            if (!uploadFy) {
+                const now = new Date();
+                const startYear = now.getMonth() >= 3 ? now.getFullYear() - 1 : now.getFullYear() - 2;
+                uploadFy = `${startYear}-${String((startYear + 1) % 100).padStart(2, '0')}`;
+            }
+
+            for (const file of selectedFiles) {
+                try {
+                    const base64Data = await new Promise((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.onload = () => resolve(String(reader.result).split(',')[1]);
+                        reader.onerror = reject;
+                        reader.readAsDataURL(file);
+                    });
+
+                    await authFetch('/api/files', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            action: 'upload',
+                            clientId: currentUserSession.clientId,
+                            fy: uploadFy,
+                            docType: 'Other Document',
+                            fileName: file.name,
+                            mimeType: file.type || 'application/octet-stream',
+                            base64Data,
+                            taskId: createdTaskId
+                        })
+                    });
+                } catch (upErr) {
+                    console.error("Failed to upload attached file:", file.name, upErr);
+                }
+            }
+        }
+
+        hideSpinner();
+        toggleClientTaskModal(false);
+        const alertMsg = selectedFiles.length > 0
+            ? `Your task #${createdTaskId} has been registered with ${selectedFiles.length} attached document(s) uploaded to Drive.`
+            : "Your task request has been registered successfully.";
+        alert(alertMsg);
+        await fetchAndRenderTasks();
+    } catch (err) {
+        hideSpinner();
+        console.error("Task submission error:", err);
+        alert("Connection error while submitting task.");
+    }
+}
+
 function handleAddTaskButtonClick() {
     if (currentUserSession.role === 'partner') {
         toggleAssignWorkModal(true);
+    } else if (currentUserSession.role === 'client') {
+        toggleClientTaskModal(true);
     } else {
         toggleStaffTaskModal(true);
     }
@@ -691,6 +1050,7 @@ function bootOfficeWorkspace() {
     const currentHash = window.location.hash.substring(1);
     const partnerTabs = ['toBeAssigned', 'allAssigned', 'pendingReview', 'closedArchive', 'masterData', 'attendanceLogs', 'analyticsSuite', 'adminCenter'];
     const staffTabs = ['myAllocations', 'myClosed', 'masterData'];
+    const clientTabs = ['clientActive', 'clientPending', 'clientClosed'];
 
     if (currentUserSession.role === 'partner') {
         leftForms.classList.add('hidden');
@@ -716,6 +1076,23 @@ function bootOfficeWorkspace() {
         }
         refreshUserSelectionDropdowns();
         populateOperatorFilterDropdown();
+    } else if (currentUserSession.role === 'client') {
+        leftForms.classList.add('hidden');
+        mainGrid.classList.remove('split');
+        tabsMenu.innerHTML = `
+            <div class="menu-header">
+                <span>Client Portal</span>
+                <button class="menu-close-btn" onclick="toggleSideMenu(false)">&times;</button>
+            </div>
+            <button class="tab-btn" id="tab_clientActive" onclick="switchActiveTab('clientActive')">Active Tasks</button>
+            <button class="tab-btn" id="tab_clientPending" onclick="switchActiveTab('clientPending')">Pending for Review</button>
+            <button class="tab-btn" id="tab_clientClosed" onclick="switchActiveTab('clientClosed')">Closed Tasks</button>
+        `;
+        if (clientTabs.includes(currentHash)) {
+            activeTab = currentHash;
+        } else {
+            activeTab = 'clientActive';
+        }
     } else {
         leftForms.classList.add('hidden');
         mainGrid.classList.remove('split');
@@ -1246,6 +1623,8 @@ async function handleOfficeUserCreation(e) {
     const username = document.getElementById('newUsername').value.trim().toLowerCase();
     const password = document.getElementById('newPassword').value;
     const role = document.getElementById('newRole').value;
+    const clientIdVal = document.getElementById('newClientId')?.value;
+    const clientId = (role === 'client' && clientIdVal) ? parseInt(clientIdVal, 10) : undefined;
 
     showSpinner("Saving...");
     try {
@@ -1257,7 +1636,8 @@ async function handleOfficeUserCreation(e) {
                 username,
                 password,
                 name: fullName,
-                role
+                role,
+                ...(clientId ? { clientId } : {})
             })
         }).then(r => r.json());
 
@@ -1273,6 +1653,41 @@ async function handleOfficeUserCreation(e) {
         alert("Network error.");
     } finally {
         hideSpinner();
+    }
+}
+
+async function handleSeedAllClientUsers() {
+    if (!confirm("This will synchronize login accounts for all registered clients with default password '1234'. Continue?")) {
+        return;
+    }
+    const statusDiv = document.getElementById('clientSyncStatus');
+    if (statusDiv) statusDiv.innerHTML = '<span style="color:#64748b;">Syncing clients...</span>';
+    showSpinner("Syncing clients...");
+    try {
+        const res = await authFetch('/api/users', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'seed_clients' })
+        }).then(r => r.json());
+
+        hideSpinner();
+        if (res.success) {
+            alert(res.message);
+            if (statusDiv) {
+                statusDiv.innerHTML = `<span style="color:var(--success-color); font-weight:600;">✓ ${res.message}</span>`;
+            }
+            await syncCoreState();
+            renderPartnerAdminCenterViewports();
+        } else {
+            alert(res.message || "Sync failed.");
+            if (statusDiv) {
+                statusDiv.innerHTML = `<span style="color:var(--danger-color); font-weight:600;">✗ ${res.message || "Failed"}</span>`;
+            }
+        }
+    } catch (err) {
+        hideSpinner();
+        console.error("Client seed error:", err);
+        alert("Error synchronizing client accounts.");
     }
 }
 
@@ -1654,12 +2069,15 @@ function renderSystemDashboardEngine() {
     }
 
     const canAddTask = (currentUserSession.role === 'partner' && (activeTab === 'allAssigned' || activeTab === 'toBeAssigned')) ||
-        (currentUserSession.role !== 'partner' && activeTab === 'myAllocations');
+        (currentUserSession.role !== 'partner' && currentUserSession.role !== 'client' && activeTab === 'myAllocations') ||
+        (currentUserSession.role === 'client' && (activeTab === 'clientActive' || activeTab === 'clientPending'));
 
+    const assignWorkBtn = document.getElementById('assignWorkBtn');
     if (canAddTask) {
-        document.getElementById('assignWorkBtn').classList.remove('hidden');
+        assignWorkBtn.classList.remove('hidden');
+        assignWorkBtn.innerText = currentUserSession.role === 'client' ? 'Submit Work' : 'Add';
     } else {
-        document.getElementById('assignWorkBtn').classList.add('hidden');
+        assignWorkBtn.classList.add('hidden');
     }
 
     const exportLedgerBtn = document.getElementById('exportLedgerBtn');
@@ -1672,6 +2090,10 @@ function renderSystemDashboardEngine() {
     } else {
         if (exportLedgerBtn) exportLedgerBtn.classList.add('hidden');
         if (exportFullLedgerBtn) exportFullLedgerBtn.classList.add('hidden');
+    }
+
+    if (currentUserSession.role === 'client' && !['clientActive', 'clientPending', 'clientClosed'].includes(activeTab)) {
+        activeTab = 'clientActive';
     }
 
     if (activeTab === 'analyticsSuite') {
@@ -1739,7 +2161,18 @@ function renderTaskTableBody() {
             `;
         }
 
-        if(task.currentStatus === 'Filed') { 
+        if (currentUserSession.role === 'client') {
+            if (task.currentStatus === 'Filed') {
+                actionCellHtml = `<td data-label="Actions"><span class="lock-badge" style="background:#dcfce7; color:#15803d; border-color:#86efac;">Completed</span></td>`;
+            } else {
+                const cancelBtn = `<button class="action-btn btn-danger" style="padding: 0.25rem 0.55rem; font-size: 0.75rem;" onclick="handleClientTaskCancellation(${taskIdentifier})">Cancel</button>`;
+                if (task.currentStatus === 'Pending Review') {
+                    actionCellHtml = `<td data-label="Actions"><div class="action-group"><span style="color:#d97706; font-size:0.85rem; font-weight:600;">Under Review</span>${cancelBtn}</div></td>`;
+                } else {
+                    actionCellHtml = `<td data-label="Actions"><div class="action-group"><span style="color:#0284c7; font-size:0.85rem; font-weight:600;">In Progress</span>${cancelBtn}</div></td>`;
+                }
+            }
+        } else if (task.currentStatus === 'Filed') { 
             actionCellHtml = `<td data-label="Actions"><div class="action-group"><span class="lock-badge">Filed</span>${crudsHtml}</div></td>`; 
         } else {
             const filedBtn = `<button class="action-btn btn-success" onclick="handleStaffFilingSubmission(${taskIdentifier})">Filed</button>`;
@@ -1782,7 +2215,17 @@ function renderTaskTableBody() {
         }
 
         const ayDisplay = task.assessmentYear ? `<span style="font-weight:600; color:#475569;">${task.assessmentYear}</span>` : '-';
-        tr.innerHTML = `<td data-label="No">${relativeIndex}</td><td data-label="Task ID" style="font-weight:700; color:var(--primary-color);">#${task.id}</td><td data-label="Client ID" style="font-weight:600; color:#64748b;">#${task.clientCode}</td><td data-label="Client" style="font-weight:600; color:var(--primary-color);">${task.clientName}</td><td data-label="Type">${task.natureOfWork}</td><td data-label="AY">${ayDisplay}</td><td data-label="Received">${standardDateFormatter(task.dateReceived)}</td><td data-label="Due" class="${dynamicRowClass}">${datePickerCell}</td><td data-label="Operator" style="font-weight:500;">${operatorDisplayName}</td><td data-label="Started">${standardDateFormatter(task.workTakenOn)}</td><td data-label="Status"><div class="status-cell-wrapper"><span class="status status-${task.currentStatus.toLowerCase().replace(/ /g, '-')}">${task.currentStatus}</span>${task.sendBackCount > 0 ? `<span style="color:var(--danger-color); font-size:0.7rem; font-weight:bold; margin-top:2px;">(Reworked x${task.sendBackCount})</span>` : ''}</div></td>${reasonCellHtml}${actionCellHtml}`;
+        let attachedHtml = '';
+        if (task.attachedFiles && task.attachedFiles.length > 0) {
+            attachedHtml = `<div style="display:flex; flex-wrap:wrap; gap:4px; margin-top:4px;">` +
+                task.attachedFiles.map(f => {
+                    const escName = (f.fileName || 'file').replace(/'/g, "\\'");
+                    const shortName = f.fileName && f.fileName.length > 18 ? f.fileName.slice(0, 16) + '…' : (f.fileName || 'file');
+                    return `<span class="badge" style="cursor:pointer; background:#eff6ff; color:#0284c7; border:1px solid #bfdbfe; font-size:0.7rem; padding:2px 6px; border-radius:4px;" onclick="downloadDriveDoc('${f.docId || ''}', '${escName}')" title="Download ${escName}">📎 ${shortName}</span>`;
+                }).join('') +
+                `</div>`;
+        }
+        tr.innerHTML = `<td data-label="No">${relativeIndex}</td><td data-label="Task ID" style="font-weight:700; color:var(--primary-color);">#${task.id}</td><td data-label="Client ID" style="font-weight:600; color:#64748b;">#${task.clientCode}</td><td data-label="Client" style="font-weight:600; color:var(--primary-color);">${task.clientName}</td><td data-label="Type"><div>${task.natureOfWork}${attachedHtml}</div></td><td data-label="AY">${ayDisplay}</td><td data-label="Received">${standardDateFormatter(task.dateReceived)}</td><td data-label="Due" class="${dynamicRowClass}">${datePickerCell}</td><td data-label="Operator" style="font-weight:500;">${operatorDisplayName}</td><td data-label="Started">${standardDateFormatter(task.workTakenOn)}</td><td data-label="Status"><div class="status-cell-wrapper"><span class="status status-${task.currentStatus.toLowerCase().replace(/ /g, '-')}">${task.currentStatus}</span>${task.sendBackCount > 0 ? `<span style="color:var(--danger-color); font-size:0.7rem; font-weight:bold; margin-top:2px;">(Reworked x${task.sendBackCount})</span>` : ''}</div></td>${reasonCellHtml}${actionCellHtml}`;
         tbody.appendChild(tr);
     });
 
@@ -2436,6 +2879,18 @@ function appendBotMessage(replyText, chips = []) {
                 } else if (chip.action === 'view_admin') {
                     if (typeof switchActiveTab === 'function') switchActiveTab('adminCenter');
                     toggleChatbot(false);
+                } else if (chip.action === 'download_doc' || chip.action === 'download_file') {
+                    downloadDriveDoc(chip.params.docId, (chip.label || '').replace(/^[^\w\d]+/, '').trim());
+                } else if (chip.action === 'upload_confirm') {
+                    confirmChatUpload(chip.params);
+                } else if (chip.action === 'classify_upload') {
+                    classifyPendingUpload(chip.params, chip.label);
+                } else if (chip.action === 'cancel_upload') {
+                    pendingChatUpload = null;
+                    appendBotMessage('Upload cancelled.');
+                } else if (chip.action === 'trigger_chat_upload') {
+                    activeTaskUploadContext = chip.params || {};
+                    chatPickFile();
                 } else {
                     executeChatAction(chip.action, chip.params, chip.label);
                 }
@@ -2540,6 +2995,17 @@ async function handleChatSubmit(e) {
     msgList.appendChild(userDiv);
     input.value = '';
     msgList.scrollTop = msgList.scrollHeight;
+
+    // A file is waiting for the user to say which client it belongs to
+    if (pendingChatUpload && pendingChatUpload.awaitingClient) {
+        classifyPendingUpload({
+            fileName: pendingChatUpload.file.name,
+            mimeType: pendingChatUpload.file.type,
+            size: pendingChatUpload.file.size,
+            message: query
+        });
+        return;
+    }
 
     chatMessageHistory.push({ role: 'user', content: query });
     if (chatMessageHistory.length > 10) chatMessageHistory = chatMessageHistory.slice(-10);
@@ -2808,6 +3274,33 @@ async function loadGoogleDriveFiles(query = '') {
     }
 }
 
+async function syncDriveToDatabase() {
+    const btn = document.getElementById('gdriveSyncBtn');
+    const oldText = btn ? btn.innerText : '';
+    if (btn) {
+        btn.innerText = 'Syncing...';
+        btn.disabled = true;
+    }
+    showSpinner('Syncing Google Drive files to database...');
+    try {
+        const res = await authFetch('/api/drive?action=sync', { method: 'POST' }).then(r => r.json());
+        if (res.success) {
+            alert(`✅ ${res.message}`);
+            loadGoogleDriveFiles();
+        } else {
+            alert(`❌ Sync failed: ${res.message || res.error}`);
+        }
+    } catch (err) {
+        alert(`❌ Network error: ${err.message}`);
+    } finally {
+        hideSpinner();
+        if (btn) {
+            btn.innerText = oldText || '🔄 Sync to Database';
+            btn.disabled = false;
+        }
+    }
+}
+
 let _driveSearchDebounce = null;
 function handleDriveSearch(val) {
     clearTimeout(_driveSearchDebounce);
@@ -2848,6 +3341,134 @@ async function handleDriveFileUpload(e) {
     } catch (err) {
         hideSpinner();
         alert("Upload error: " + err.message);
+    }
+}
+
+// ==========================================
+// DRIVE DOCUMENTS IN CHAT (find / download / upload)
+// ==========================================
+let pendingChatUpload = null; // { file, awaitingClient, taskContext }
+let activeTaskUploadContext = null;
+// Vercel rejects request bodies over 4.5 MB; base64 adds ~33%. Raise this when self-hosting.
+const MAX_CHAT_UPLOAD_BYTES = 3 * 1024 * 1024;
+
+function addChatUserBubble(text) {
+    const msgList = document.getElementById('chatMessageList');
+    if (!msgList) return;
+    const div = document.createElement('div');
+    div.className = 'chat-msg user';
+    div.innerText = text;
+    msgList.appendChild(div);
+    msgList.scrollTop = msgList.scrollHeight;
+}
+
+function chatPickFile() {
+    document.getElementById('chatFileInput')?.click();
+}
+window.chatPickFile = chatPickFile;
+
+async function handleChatFileSelected(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    if (file.size > MAX_CHAT_UPLOAD_BYTES) {
+        appendBotMessage(`**${file.name}** is too large to upload here (limit ${(MAX_CHAT_UPLOAD_BYTES / 1048576).toFixed(0)} MB). Please send it to the office directly.`);
+        return;
+    }
+    const taskCtx = activeTaskUploadContext;
+    activeTaskUploadContext = null;
+
+    pendingChatUpload = { file, awaitingClient: false, taskContext: taskCtx };
+    const input = document.getElementById('chatInputText');
+    const typed = input ? input.value.trim() : '';
+    if (input) input.value = '';
+    const taskBadge = taskCtx && taskCtx.taskId ? ` (for Task #${taskCtx.taskId})` : '';
+    addChatUserBubble(`📎 ${file.name}${taskBadge}${typed ? ' — ' + typed : ''}`);
+    const classifyParams = { fileName: file.name, mimeType: file.type, size: file.size, message: typed };
+    if (taskCtx) {
+        if (taskCtx.taskId) classifyParams.taskId = taskCtx.taskId;
+        if (taskCtx.clientCode) classifyParams.clientId = taskCtx.clientCode;
+        if (taskCtx.assessmentYear) classifyParams.assessmentYear = taskCtx.assessmentYear;
+    }
+    await classifyPendingUpload(classifyParams);
+}
+window.handleChatFileSelected = handleChatFileSelected;
+
+async function classifyPendingUpload(params, label) {
+    if (!pendingChatUpload) { appendBotMessage('Please attach the file again with 📎.'); return; }
+    if (label) addChatUserBubble(label);
+    try {
+        const taskCtx = pendingChatUpload.taskContext;
+        const payload = { action: 'classify_upload', ...params };
+        if (taskCtx && taskCtx.taskId && !payload.taskId) {
+            payload.taskId = taskCtx.taskId;
+        }
+        const res = await authFetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        }).then(r => r.json());
+        pendingChatUpload.awaitingClient = !!res.awaitingClient;
+        appendBotMessage(res.reply || res.message || 'Could not process the upload.', res.chips || []);
+    } catch (err) {
+        appendBotMessage('Network error: ' + err.message);
+    }
+}
+
+async function confirmChatUpload(params) {
+    if (!pendingChatUpload) { appendBotMessage('Please attach the file again with 📎.'); return; }
+    const file = pendingChatUpload.file;
+    const taskCtx = pendingChatUpload.taskContext;
+    const taskId = params.taskId || (taskCtx ? taskCtx.taskId : null);
+    addChatUserBubble('✅ Save to Drive');
+    try {
+        const base64Data = await new Promise((resolve, reject) => {
+            const r = new FileReader();
+            r.onload = () => resolve(String(r.result).split(',')[1]);
+            r.onerror = reject;
+            r.readAsDataURL(file);
+        });
+        const uploadPayload = {
+            action: 'upload',
+            clientId: params.clientId, fy: params.fy, docType: params.docType,
+            fileName: file.name, mimeType: file.type, base64Data
+        };
+        if (taskId) {
+            uploadPayload.taskId = taskId;
+        }
+        const res = await authFetch('/api/files', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(uploadPayload)
+        }).then(r => r.json());
+        if (res.success) {
+            pendingChatUpload = null;
+            appendBotMessage(res.reply, res.chips || []);
+            if (typeof fetchAndRenderTasks === 'function') {
+                fetchAndRenderTasks().catch(() => {});
+            }
+        } else {
+            appendBotMessage('⚠️ Upload failed: ' + (res.message || 'unknown error'));
+        }
+    } catch (err) {
+        appendBotMessage('⚠️ Upload failed: ' + err.message);
+    }
+}
+
+async function downloadDriveDoc(docId, fileName) {
+    try {
+        const res = await authFetch(`/api/files?action=download&id=${encodeURIComponent(docId)}`);
+        if (!res.ok) { appendBotMessage('⚠️ Could not download that file.'); return; }
+        const url = URL.createObjectURL(await res.blob());
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName || 'document';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (err) {
+        appendBotMessage('⚠️ Download failed: ' + err.message);
     }
 }
 

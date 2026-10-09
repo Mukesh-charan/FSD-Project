@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "npx vercel dev"
+    "dev": "npx vercel dev",
+    "test": "node tests/client_workflow.test.js && node tests/task_attachments.test.js && node tests/staff_chat_actions.test.js && node tests/drive_e2e.test.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

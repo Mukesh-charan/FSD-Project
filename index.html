@@ -83,7 +83,8 @@
                 <div class="card">
                     <div class="card-title" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem;">
                         <span>Clients</span>
-                        <div style="display:flex; gap:0.5rem;">
+                        <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+                            <button class="export-btn" style="background-color: var(--secondary-color);" onclick="handleSeedAllClientUsers()">Sync Client Logins (1234)</button>
                             <button class="export-btn" style="background-color: var(--success-color);" onclick="exportDataEngine('CLIENTS')">Export</button>
                             <button class="export-btn" style="background-color: var(--accent-color);" onclick="toggleClientModal(true)">Add</button>
                         </div>
@@ -202,7 +203,12 @@
                                 <option value="partner">Partner</option>
                                 <option value="staff">Staff</option>
                                 <option value="article">Article</option>
+                                <option value="client">Client</option>
                             </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Client ID (only for Client role)</label>
+                            <input type="number" id="newClientId" class="form-control">
                         </div>
                         <button type="submit" class="btn-primary">Save</button>
                     </form>
@@ -221,6 +227,15 @@
                         </div>
                         <button type="submit" class="btn-secondary" style="padding:0.4rem; font-size:0.8rem; background-color:var(--secondary-color);">Save</button>
                     </form>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">Client Logins Sync</div>
+                    <p style="font-size: 0.82rem; color: #64748b; margin-bottom: 0.8rem; line-height: 1.4;">
+                        Bulk provisions login accounts for all registered clients with username <code>c&lt;clientId&gt;</code> and password <code>1234</code>.
+                    </p>
+                    <button type="button" class="btn-primary" style="background-color: var(--secondary-color); width: 100%;" onclick="handleSeedAllClientUsers()">Sync All Clients (Pass: 1234)</button>
+                    <div id="clientSyncStatus" style="margin-top: 0.5rem; font-size: 0.8rem; font-weight: 500;"></div>
                 </div>
 
                 <div class="card admin-full-width">
@@ -632,6 +647,62 @@
         </div>
     </div>
 
+    <!-- Modal overlay for Client Add Task -->
+    <div class="modal-backdrop hidden" id="clientTaskModalOverlay">
+        <div class="modal-surface" style="max-width: 500px;">
+            <div class="modal-header">
+                <h3>Submit New Work Request</h3>
+                <button class="modal-close-trigger" onclick="toggleClientTaskModal(false)">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="clientTaskForm" onsubmit="handleClientTaskSubmission(event)">
+                    <div class="form-group">
+                        <label>Client</label>
+                        <input type="text" id="clientTaskClientDisplay" class="form-control" readonly style="background-color: #f1f5f9; cursor: not-allowed; font-weight: 600;">
+                    </div>
+                    <div class="form-group">
+                        <label>Quick Service Recommendations</label>
+                        <div id="clientTaskChipsContainer" style="display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.25rem;"></div>
+                    </div>
+                    <div class="form-group">
+                        <label>Nature of Work / Service</label>
+                        <select id="clientTaskNatureSelect" class="form-control" required onchange="handleClientNatureChange()"></select>
+                    </div>
+                    <div class="form-group" id="clientTaskAyGroup">
+                        <label>Assessment Year (AY)</label>
+                        <input type="text" id="clientTaskAssessmentYear" class="form-control" placeholder="e.g. 2025-26" list="ayList">
+                    </div>
+                    <div class="form-group">
+                        <label>Preferred Staff / Operator</label>
+                        <select id="clientTaskOperatorSelect" class="form-control" onchange="highlightSelectedClientStaff(this.value)">
+                            <option value="">-- Office Pool (Unassigned) --</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="clientTaskStaffRecBox" style="margin-top: -0.4rem; margin-bottom: 0.8rem;">
+                        <label style="font-size: 0.78rem; color: #64748b; font-weight: 600; display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.3rem;">
+                            <span>⭐ Smart Staff Recommendations</span>
+                            <span id="clientStaffRecStatus" style="font-weight: 400; font-size: 0.72rem; color: #94a3b8;"></span>
+                        </label>
+                        <div id="clientTaskStaffRecList" style="display: flex; flex-direction: column; gap: 0.35rem;"></div>
+                    </div>
+                    <div class="form-group">
+                        <label>Target / Preferred Due Date</label>
+                        <input type="date" id="clientTaskDueDate" class="form-control" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Attach Supporting Documents (Optional)</label>
+                        <input type="file" id="clientTaskFileInput" class="form-control" multiple accept=".pdf,.xlsx,.xls,.docx,.doc,.jpg,.jpeg,.png,.json" onchange="handleClientTaskFileSelection(event)">
+                        <small style="color: #64748b; font-size: 0.75rem; display: block; margin-top: 0.25rem;">
+                            Upload Form 16, Bank statements, PAN copy, or bills to save directly to your Drive vault.
+                        </small>
+                        <div id="clientTaskFilesPreview" style="margin-top: 0.4rem; display: flex; flex-direction: column; gap: 0.25rem;"></div>
+                    </div>
+                    <button type="submit" class="btn-primary" style="background-color: var(--accent-color);">Submit Work Request</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
     <!-- Modal overlay for Quick Job Allocation/Reassignment -->
     <div class="modal-backdrop hidden" id="reassignModalOverlay">
         <div class="modal-surface" style="max-width: 400px;">
@@ -723,7 +794,9 @@
             </div>
         </div>
         <form class="chatbot-input-bar" onsubmit="handleChatSubmit(event)">
-            <input type="text" id="chatInputText" placeholder="Ask about clients, tasks, or drive docs..." autocomplete="off">
+            <input type="file" id="chatFileInput" class="hidden" onchange="handleChatFileSelected(event)">
+            <button type="button" onclick="chatPickFile()" title="Attach a document" style="background:none; border:none; font-size:1.2rem; cursor:pointer;">📎</button>
+            <input type="text" id="chatInputText" placeholder="Ask for a document, or attach one with 📎..." autocomplete="off">
             <button type="submit">Send</button>
         </form>
     </div>
@@ -773,21 +846,16 @@
             <div class="modal-header">
                 <div>
                     <h3 style="margin:0;">Google Drive Cloud Vault</h3>
-                    <span id="gdriveStatusSubtitle" style="font-size:0.8rem; color:#64748b;">Service Account Storage</span>
+                    <span id="gdriveStatusSubtitle" style="font-size:0.8rem; color:#64748b;">Google OAuth 2.0 Cloud Storage</span>
                 </div>
                 <button class="modal-close-trigger" onclick="toggleGoogleDriveModal(false)">&times;</button>
             </div>
             <div class="modal-body">
                 <div id="gdriveSetupPanel" class="hidden" style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:8px; padding:1rem; margin-bottom:1rem;">
-                    <h4 style="margin:0 0 0.5rem 0; color:var(--primary-color);">Connect Google Service Account</h4>
+                    <h4 style="margin:0 0 0.5rem 0; color:var(--primary-color);">Connect Google OAuth Account</h4>
                     <p style="font-size:0.8rem; color:#475569; margin-bottom:0.75rem;">
-                        Paste your Google Service Account JSON credentials (or credentials JSON content) to connect Google Drive:
+                        Google Drive OAuth 2.0 is configured via Vercel environment variables.
                     </p>
-                    <textarea id="gdriveCredsJson" class="form-control" rows="4" placeholder='{"type": "service_account", "client_email": "...", "private_key": "..."}'></textarea>
-                    <div style="margin-top:0.75rem; display:flex; gap:0.5rem;">
-                        <input type="text" id="gdriveRootFolderId" class="form-control" placeholder="Optional Google Drive Root Folder ID">
-                        <button class="btn-primary" style="width:auto;" onclick="saveGoogleDriveConfig()">Connect Account</button>
-                    </div>
                 </div>
 
                 <div id="gdriveBrowserPanel">
@@ -795,6 +863,7 @@
                         <div style="display:flex; gap:0.5rem; align-items:center;">
                             <input type="text" id="gdriveSearchInput" class="form-control" placeholder="Search Drive files..." oninput="handleDriveSearch(this.value)" style="width:250px;">
                             <button class="btn-secondary" onclick="loadGoogleDriveFiles()">Refresh</button>
+                            <button class="btn-primary" id="gdriveSyncBtn" style="background:#0284c7; width:auto; white-space:nowrap;" onclick="syncDriveToDatabase()">🔄 Sync to Database</button>
                         </div>
                         <div style="display:flex; gap:0.5rem;">
                             <input type="file" id="gdriveFileInput" class="hidden" onchange="handleDriveFileUpload(event)">

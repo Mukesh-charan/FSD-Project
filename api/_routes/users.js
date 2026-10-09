@@ -12,10 +12,17 @@ module.exports = async (req, res) => {
     const { db } = await connectToDatabase();
     const usersCollection = db.collection('users');
 
-    // 1. GET requests fetch all registered users (any logged in user)
+    // 1. GET requests fetch registered users
     if (req.method === 'GET') {
-        if (!checkRole(decoded, ['partner', 'staff', 'article'])) {
+        if (!checkRole(decoded, ['partner', 'staff', 'article', 'client'])) {
             return res.status(403).json({ success: false, message: 'Forbidden: Insufficient privileges.' });
+        }
+        if (decoded.role === 'client') {
+            const staffUsers = await usersCollection.find(
+                { role: { $in: ['partner', 'staff', 'article'] } }
+            ).toArray();
+            const safeStaff = staffUsers.map(u => ({ username: u.username, name: u.name, role: u.role }));
+            return res.status(200).json({ success: true, users: safeStaff });
         }
         const allUsers = await usersCollection.find({}).toArray();
         const usersData = allUsers.map(u => {
@@ -119,12 +126,75 @@ module.exports = async (req, res) => {
     if (req.method === 'POST') {
       const { action } = req.body;
 
+      if (action === 'seed_clients') {
+        if (!checkRole(decoded, ['partner'])) {
+          return res.status(403).json({ success: false, message: 'Forbidden: Admins only.' });
+        }
+
+        const clientsCol = db.collection('clients');
+        const clients = await clientsCol.find({}).sort({ id: 1 }).toArray();
+
+        let createdCount = 0;
+        let updatedCount = 0;
+
+        for (const c of clients) {
+          const username = `c${c.id}`;
+          const name = c.name || `Client #${c.id}`;
+          const defaultPassword = '1234';
+
+          const existingUser = await usersCollection.findOne({
+            $or: [
+              { username },
+              { role: 'client', clientId: c.id }
+            ]
+          });
+
+          if (existingUser) {
+            await usersCollection.updateOne(
+              { _id: existingUser._id },
+              {
+                $set: {
+                  username,
+                  password: defaultPassword,
+                  name,
+                  role: 'client',
+                  clientId: c.id,
+                  requireBiometric: false
+                }
+              }
+            );
+            updatedCount++;
+          } else {
+            await usersCollection.insertOne({
+              username,
+              password: defaultPassword,
+              name,
+              role: 'client',
+              clientId: c.id,
+              requireBiometric: false,
+              faceDescriptor: null
+            });
+            createdCount++;
+          }
+        }
+
+        await logAuditAction(db, decoded.username, 'SEED_CLIENT_USERS', { createdCount, updatedCount, totalClients: clients.length });
+
+        return res.status(200).json({
+          success: true,
+          message: `Client users synchronized successfully: ${createdCount} created, ${updatedCount} updated. Password set to 1234.`,
+          createdCount,
+          updatedCount,
+          total: clients.length
+        });
+      }
+
       if (action === 'create') {
         if (!checkRole(decoded, ['partner'])) {
           return res.status(403).json({ success: false, message: 'Forbidden: Admins only.' });
         }
 
-        const { username, password, name, role } = req.body;
+        const { username, password, name, role, clientId } = req.body;
         if (!username || !password || !name || !role) {
           return res.status(400).json({ success: false, message: 'All fields (username, password, name, role) are required.' });
         }
@@ -135,11 +205,21 @@ module.exports = async (req, res) => {
           return res.status(400).json({ success: false, message: 'Username already exists.' });
         }
 
+        let linkedClientId;
+        if (role === 'client') {
+          linkedClientId = parseInt(clientId, 10);
+          const linked = Number.isInteger(linkedClientId) ? await db.collection('clients').findOne({ id: linkedClientId }) : null;
+          if (!linked) {
+            return res.status(400).json({ success: false, message: 'A client login must be linked to an existing client ID.' });
+          }
+        }
+
         await usersCollection.insertOne({
           username: uInput,
           password: password,
           name: name.trim(),
           role,
+          ...(role === 'client' ? { clientId: linkedClientId } : {}),
           requireBiometric: false,
           faceDescriptor: null
         });

@@ -73,7 +73,7 @@ module.exports = async (req, res) => {
 
     if (isPasswordCorrect) {
       const token = jwt.sign(
-        { username: user.username, role: user.role, name: user.name },
+        { username: user.username, role: user.role, name: user.name, ...(user.role === 'client' ? { clientId: user.clientId } : {}) },
         JWT_SECRET,
         { expiresIn: '7d' }
       );
@@ -86,7 +86,8 @@ module.exports = async (req, res) => {
         user: {
           username: user.username,
           name: user.name,
-          role: user.role
+          role: user.role,
+          ...(user.role === 'client' ? { clientId: user.clientId } : {})
         }
       });
     } else {

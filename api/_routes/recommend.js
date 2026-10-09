@@ -132,12 +132,15 @@ module.exports = async (req, res) => {
       return res.status(401).json({ success: false, message: 'Unauthorized: Missing or invalid token.' });
     }
 
-    if (!checkRole(decoded, ['partner', 'staff', 'article'])) {
+    if (!checkRole(decoded, ['partner', 'staff', 'article', 'client'])) {
       return res.status(403).json({ success: false, message: 'Forbidden: Insufficient privileges.' });
     }
 
     const { db } = await connectToDatabase();
-    const clientCode = (req.query.clientCode || (req.body && req.body.clientCode) || '').trim();
+    let clientCode = (req.query.clientCode || (req.body && req.body.clientCode) || '').trim();
+    if (decoded.role === 'client') {
+      clientCode = String(decoded.clientId);
+    }
     const natureOfWork = (req.query.natureOfWork || (req.body && req.body.natureOfWork) || '').trim();
     const limit = parseInt(req.query.limit || (req.body && req.body.limit) || '0') || null;
 

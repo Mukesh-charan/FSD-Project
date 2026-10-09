@@ -8,7 +8,7 @@ module.exports = async (req, res) => {
       return res.status(401).json({ success: false, message: 'Unauthorized: Missing or invalid token.' });
     }
 
-    if (!checkRole(decoded, ['partner', 'staff', 'article'])) {
+    if (!checkRole(decoded, ['partner', 'staff', 'article', 'client'])) {
       return res.status(403).json({ success: false, message: 'Forbidden: Insufficient privileges.' });
     }
 
@@ -17,8 +17,15 @@ module.exports = async (req, res) => {
     const tasksCollection = db.collection('tasks');
 
     if (req.method === 'GET') {
-        if (!checkRole(decoded, ['partner', 'staff', 'article'])) {
-            return res.status(403).json({ success: false, message: 'Forbidden: Insufficient privileges.' });
+        if (decoded.role === 'client') {
+            const client = await clientsCollection.findOne({
+                $or: [{ id: Number(decoded.clientId) }, { id: String(decoded.clientId) }]
+            });
+            return res.status(200).json({
+                success: true,
+                clients: client ? [client] : [],
+                totalCount: client ? 1 : 0
+            });
         }
         const { search, page, limit } = req.query;
         let query = {};
@@ -50,6 +57,9 @@ module.exports = async (req, res) => {
 
     // 2. POST: Create or Save a new client
     if (req.method === 'POST') {
+      if (!checkRole(decoded, ['partner', 'staff', 'article'])) {
+        return res.status(403).json({ success: false, message: 'Forbidden: Insufficient privileges.' });
+      }
       const { 
         id, name, pan, contact, email,
         passwordITR, taxAuditCase, dob, address,
@@ -111,6 +121,9 @@ module.exports = async (req, res) => {
 
     // 3. PUT: Update a client's details
     if (req.method === 'PUT') {
+      if (!checkRole(decoded, ['partner', 'staff', 'article'])) {
+        return res.status(403).json({ success: false, message: 'Forbidden: Insufficient privileges.' });
+      }
       const { 
         id, name, pan, contact, email,
         passwordITR, taxAuditCase, dob, address,
@@ -172,6 +185,9 @@ module.exports = async (req, res) => {
 
     // 4. DELETE: Wipe out client and associated tasks
     if (req.method === 'DELETE') {
+      if (!checkRole(decoded, ['partner'])) {
+        return res.status(403).json({ success: false, message: 'Forbidden: Admins only.' });
+      }
       const { id } = req.query;
 
       if (!id) {

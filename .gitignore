@@ -4,7 +4,14 @@ node_modules/
 # Environment Variables
 .env
 .env.*
-.env.example
+!.env.example
+service-account*.json
+oauth-credentials*.json
+*credentials*.json
+*token*.json
+google*.json
+client_secret*.json
+sample_data/
 
 # Deployment & Temporary Artifacts
 .vercel/
@@ -12,3 +19,5 @@ runs/
 *.log
 .DS_Store
 Thumbs.db
+
+.env*

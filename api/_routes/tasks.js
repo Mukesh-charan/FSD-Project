@@ -13,20 +13,25 @@ module.exports = async (req, res) => {
 
     // 1. GET: Fetch tasks with filtering and pagination
     if (req.method === 'GET') {
-        if (!checkRole(decoded, ['partner', 'staff', 'article'])) {
+        if (!checkRole(decoded, ['partner', 'staff', 'article', 'client'])) {
             return res.status(403).json({ success: false, message: 'Forbidden: Insufficient privileges.' });
         }
-        try {
-            await ensureUniqueTaskIds(tasksCollection);
-            await generateAutoGstTasks(db);
-        } catch (err) {
-            console.error('Error initializing tasks/GST:', err);
+        if (decoded.role !== 'client') {
+            try {
+                await ensureUniqueTaskIds(tasksCollection);
+                await generateAutoGstTasks(db);
+            } catch (err) {
+                console.error('Error initializing tasks/GST:', err);
+            }
         }
 
         const { status, search, operator, page, limit, mode } = req.query;
 
         // Stats mode for analytics dashboard
         if (mode === 'stats') {
+            if (decoded.role === 'client') {
+                return res.status(403).json({ success: false, message: 'Forbidden: Client cannot access office analytics.' });
+            }
             const statusCounts = await tasksCollection.aggregate([
                 { $group: { _id: '$currentStatus', count: { $sum: 1 } } }
             ]).toArray();
@@ -50,15 +55,19 @@ module.exports = async (req, res) => {
 
         // Build filter query
         let query = {};
+        if (decoded.role === 'client') {
+            const cId = decoded.clientId;
+            query.clientCode = { $in: [String(cId), Number(cId)] };
+        }
         if (status) {
             const statuses = status.split(',').map(s => s.trim());
             query.currentStatus = statuses.length === 1 ? statuses[0] : { $in: statuses };
         }
-        if (operator) {
+        if (operator && decoded.role !== 'client') {
             query.workTakenBy = operator.trim().toLowerCase();
         }
-        // Enforce own-tasks-only for non-partner users
-        if (!checkRole(decoded, ['partner'])) {
+        // Enforce own-tasks-only for non-partner/non-client staff users
+        if (!checkRole(decoded, ['partner', 'client'])) {
             if (operator) query.workTakenBy = decoded.username;
         }
         if (search) {
@@ -66,8 +75,6 @@ module.exports = async (req, res) => {
             const searchRegex = { $regex: cleanSearch, $options: 'i' };
             const searchNum = parseInt(cleanSearch.replace(/^#/, ''));
             const orList = [
-                { clientName: searchRegex },
-                { clientCode: searchRegex },
                 { natureOfWork: searchRegex },
                 { assessmentYear: searchRegex },
                 { workTakenBy: searchRegex },
@@ -75,7 +82,13 @@ module.exports = async (req, res) => {
             ];
             if (!isNaN(searchNum)) {
                 orList.push({ id: searchNum });
-                orList.push({ clientCode: String(searchNum) });
+            }
+            if (decoded.role !== 'client') {
+                orList.push({ clientName: searchRegex });
+                orList.push({ clientCode: searchRegex });
+                if (!isNaN(searchNum)) {
+                    orList.push({ clientCode: String(searchNum) });
+                }
             }
             query.$or = orList;
         }
@@ -97,26 +110,37 @@ module.exports = async (req, res) => {
         return res.status(200).json(response);
     }
 
-    // 2. POST: Inward new client work (Accessible by partner, staff, article)
+    // 2. POST: Inward new client work (Accessible by partner, staff, article, client)
     if (req.method === 'POST') {
-      if (!checkRole(decoded, ['partner', 'staff', 'article'])) {
+      if (!checkRole(decoded, ['partner', 'staff', 'article', 'client'])) {
         return res.status(403).json({ success: false, message: 'Forbidden: Insufficient privileges.' });
       }
 
       const { clientCode, clientName, natureOfWork, assessmentYear, dateReceived, dueDate, operator } = req.body;
 
-      if (!clientCode || !clientName || !natureOfWork || !dateReceived || !dueDate) {
+      let effectiveClientCode = clientCode ? String(clientCode) : '';
+      let effectiveClientName = clientName ? clientName.trim() : '';
+      const effectiveDateReceived = dateReceived || new Date().toISOString().split('T')[0];
+
+      if (decoded.role === 'client') {
+        effectiveClientCode = String(decoded.clientId);
+        const clientDoc = await db.collection('clients').findOne({
+          $or: [{ id: Number(decoded.clientId) }, { id: String(decoded.clientId) }]
+        });
+        effectiveClientName = clientDoc ? clientDoc.name : (decoded.name || `Client #${decoded.clientId}`);
+      }
+
+      if (!effectiveClientCode || !effectiveClientName || !natureOfWork || !effectiveDateReceived || !dueDate) {
         return res.status(400).json({ success: false, message: 'All registration parameters are required.' });
       }
 
-      const clientCodeClean = String(clientCode);
       const natureOfWorkClean = natureOfWork.trim();
       const isGstWork = isGstWorkCheck(natureOfWorkClean);
       const ayClean = isGstWork ? "" : (assessmentYear ? String(assessmentYear).trim() : "");
 
       // Check for duplicate active task (currentStatus !== "Filed")
       const duplicateQuery = {
-        clientCode: clientCodeClean,
+        clientCode: { $in: [effectiveClientCode, Number(effectiveClientCode)] },
         natureOfWork: natureOfWorkClean,
         currentStatus: { $ne: "Filed" }
       };
@@ -127,7 +151,7 @@ module.exports = async (req, res) => {
       if (existingTask) {
         return res.status(400).json({
           success: false,
-          message: `Duplicate task allocation blocked: An active task for client "${clientName.trim()}" for "${natureOfWorkClean}"${ayClean ? ' (AY: ' + ayClean + ')' : ''} is already open (Status: ${existingTask.currentStatus}, Assigned to: ${existingTask.workTakenBy || 'Unassigned'}).`
+          message: `Duplicate task allocation blocked: An active task for client "${effectiveClientName}" for "${natureOfWorkClean}"${ayClean ? ' (AY: ' + ayClean + ')' : ''} is already open (Status: ${existingTask.currentStatus}, Assigned to: ${existingTask.workTakenBy || 'Unassigned'}).`
         });
       }
 
@@ -136,17 +160,19 @@ module.exports = async (req, res) => {
 
       const newTask = {
         id: nextTaskId,
-        clientCode: clientCodeClean,
-        clientName: clientName.trim(),
+        clientCode: effectiveClientCode,
+        clientName: effectiveClientName,
         natureOfWork: natureOfWorkClean,
         assessmentYear: ayClean,
-        dateReceived: dateReceived,
+        dateReceived: effectiveDateReceived,
         dueDate: dueDate,
         currentStatus: isAssigned ? "Assigned" : "Unassigned",
         workTakenBy: isAssigned ? operator.trim().toLowerCase() : "",
         workTakenOn: isAssigned ? new Date().toISOString().split('T')[0] : "",
         sendBackCount: 0,
-        reasonForPending: ""
+        reasonForPending: "",
+        createdRole: decoded.role,
+        attachedFiles: Array.isArray(req.body.attachedFiles) ? req.body.attachedFiles : []
       };
 
       await tasksCollection.insertOne(newTask);
@@ -258,10 +284,10 @@ module.exports = async (req, res) => {
       return res.status(200).json({ success: true, message: 'Task updated successfully.', task: updatedTask });
     }
 
-    // 4. DELETE: Delete a task from the ledger (Accessible by partner only)
+    // 4. DELETE: Delete a task from the ledger (Accessible by partner, and clients for own non-filed tasks)
     if (req.method === 'DELETE') {
-      if (!checkRole(decoded, ['partner'])) {
-        return res.status(403).json({ success: false, message: 'Forbidden: Admins only.' });
+      if (!checkRole(decoded, ['partner', 'client'])) {
+        return res.status(403).json({ success: false, message: 'Forbidden: Insufficient privileges.' });
       }
 
       const { id } = req.query;
@@ -281,6 +307,16 @@ module.exports = async (req, res) => {
       });
       if (!taskToDelete) {
         return res.status(404).json({ success: false, message: 'Task not found.' });
+      }
+
+      if (decoded.role === 'client') {
+        const matchesClient = String(taskToDelete.clientCode) === String(decoded.clientId);
+        if (!matchesClient) {
+          return res.status(403).json({ success: false, message: 'Forbidden: You can only delete your own tasks.' });
+        }
+        if (taskToDelete.currentStatus === 'Filed') {
+          return res.status(400).json({ success: false, message: 'Completed / Filed tasks cannot be deleted.' });
+        }
       }
 
       const result = await tasksCollection.deleteOne({ _id: taskToDelete._id });
